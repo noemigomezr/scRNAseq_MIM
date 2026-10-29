@@ -1,0 +1,40 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r instalar, eval=FALSE}
+BiocManager::install("TENxBrainData")
+```
+
+```{r libraries}
+library(TENxBrainData)
+library(SingleCellExperiment)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+```
+
+```{r preparar_datos}
+# Descargar datos y seleccionar 3000 células
+sce <- TENxBrainData20k()
+set.seed(42)
+sce <- sce[, sample(ncol(sce), 3000)]
+
+# Asignar símbolos génicos; usar Ensembl cuando falte el símbolo
+simbolos <- as.character(rowData(sce)$Symbol)
+ensembl <- as.character(rowData(sce)$Ensembl)
+simbolos[is.na(simbolos) | simbolos == ""] <-
+  ensembl[is.na(simbolos) | simbolos == ""]
+rownames(sce) <- make.unique(simbolos)
+
+# Asignar identificadores celulares únicos
+colnames(sce) <- make.unique(
+  paste(colData(sce)$Library, colData(sce)$Barcode, sep = "_")
+)
+
+# Extraer matriz de UMI y crear objeto Seurat
+counts <- as(assay(sce, "counts"), "dgCMatrix")
+obj <- CreateSeuratObject(counts = counts, project = "Brain_E18")
+
+obj
+```
