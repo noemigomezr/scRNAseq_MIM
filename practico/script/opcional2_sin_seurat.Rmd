@@ -1,0 +1,230 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r instalar, eval=FALSE}
+BiocManager::install(c("TENxBrainData", "SingleCellExperiment", "scran", "scater"))
+install.packages(c("Matrix", "ggplot2", "patchwork", "igraph", "uwot", "Rtsne"))
+```
+
+```{r libraries}
+library(TENxBrainData)
+library(SingleCellExperiment)
+library(Matrix)
+library(scran)
+library(scater)
+library(ggplot2)
+library(patchwork)
+library(igraph)
+stopifnot(file.exists("../output/brain_referencia.RData"))
+load("../output/brain_referencia.RData")
+```
+
+```{r preparar_datos}
+sce <- TENxBrainData20k()
+set.seed(42)
+sce <- sce[, sample(ncol(sce), 3000)]
+simbolos <- as.character(rowData(sce)$Symbol)
+ensembl <- as.character(rowData(sce)$Ensembl)
+simbolos[is.na(simbolos) | simbolos == ""] <- ensembl[is.na(simbolos) | simbolos == ""]
+rownames(sce) <- make.unique(simbolos)
+colnames(sce) <- make.unique(paste(colData(sce)$Library, colData(sce)$Barcode, sep = "_"))
+assay(sce, "counts") <- as(assay(sce, "counts"), "dgCMatrix")
+```
+
+```{r explorar}
+cat("Células:", ncol(sce), "\nGenes:", nrow(sce), "\n")
+head(rownames(sce))
+head(colnames(sce))
+assayNames(sce)
+as.matrix(assay(sce, "counts")[1:5, 1:5])
+```
+
+```{r calcular_qc}
+genes_mt <- grep("^mt-", rownames(sce), value = TRUE)
+stopifnot(length(genes_mt) > 0)
+sce$nCount_RNA <- Matrix::colSums(assay(sce, "counts"))
+sce$nFeature_RNA <- Matrix::colSums(assay(sce, "counts") > 0)
+sce$percent.mt <- 100 * Matrix::colSums(assay(sce, "counts")[genes_mt, ]) / sce$nCount_RNA
+metricas_qc <- c("nFeature_RNA", "nCount_RNA", "percent.mt")
+qc <- as.data.frame(colData(sce))[, metricas_qc]
+summary(qc)
+```
+
+```{r violin_antes, fig.width=12, fig.height=5}
+qc_largo <- data.frame(metrica = rep(metricas_qc, each = ncol(sce)), valor = unlist(qc, use.names = FALSE))
+ggplot(qc_largo, aes(x = "Células", y = valor)) + geom_violin(fill = "salmon") +
+  geom_jitter(width = 0.2, size = 0.1) + facet_wrap(~metrica, scales = "free_y", nrow = 1) +
+  labs(x = NULL, y = NULL) + theme_classic()
+```
+
+```{r scatter_antes, fig.width=10, fig.height=4}
+p1 <- ggplot(qc, aes(nCount_RNA, nFeature_RNA)) + geom_point(size = 0.2) +
+  ggtitle(paste("R =", round(cor(qc$nCount_RNA, qc$nFeature_RNA), 2))) + theme_classic()
+p2 <- ggplot(qc, aes(nCount_RNA, percent.mt)) + geom_point(size = 0.2) +
+  ggtitle(paste("R =", round(cor(qc$nCount_RNA, qc$percent.mt), 2))) + theme_classic()
+p1 + p2
+```
+
+```{r filtrar_qc}
+antes <- c(Celulas = ncol(sce), Genes = nrow(sce), Genes_detectados = sum(Matrix::rowSums(assay(sce, "counts")) > 0))
+sce <- sce[, sce$nFeature_RNA > 300 & sce$nFeature_RNA < 5000 & sce$percent.mt < 10]
+despues <- c(Celulas = ncol(sce), Genes = nrow(sce), Genes_detectados = sum(Matrix::rowSums(assay(sce, "counts")) > 0))
+data.frame(Antes = antes, Despues = despues, Perdida_pct = round(100 * (1 - despues / antes), 2))
+stopifnot(identical(colnames(sce), colnames(referencia$counts)))
+qc <- as.data.frame(colData(sce))[, metricas_qc]
+summary(qc)
+```
+
+```{r violin_despues, fig.width=12, fig.height=5}
+qc_largo <- data.frame(metrica = rep(metricas_qc, each = ncol(sce)), valor = unlist(qc, use.names = FALSE))
+ggplot(qc_largo, aes(x = "Células", y = valor)) + geom_violin(fill = "salmon") +
+  geom_jitter(width = 0.2, size = 0.1) + facet_wrap(~metrica, scales = "free_y", nrow = 1) +
+  labs(x = NULL, y = NULL) + theme_classic()
+```
+
+```{r scatter_despues, fig.width=10, fig.height=4}
+p1 <- ggplot(qc, aes(nCount_RNA, nFeature_RNA)) + geom_point(size = 0.2) +
+  ggtitle(paste("R =", round(cor(qc$nCount_RNA, qc$nFeature_RNA), 2))) + theme_classic()
+p2 <- ggplot(qc, aes(nCount_RNA, percent.mt)) + geom_point(size = 0.2) +
+  ggtitle(paste("R =", round(cor(qc$nCount_RNA, qc$percent.mt), 2))) + theme_classic()
+p1 + p2
+```
+
+```{r normalizacion, fig.width=10, fig.height=4}
+assay(sce, "logcounts", withDimnames = FALSE) <- log1p(assay(sce, "counts") %*% Diagonal(x = 10000 / sce$nCount_RNA))
+cat("Máxima diferencia con LogNormalize:", max(abs(assay(sce, "logcounts") - referencia$normalizados)), "\n")
+originales <- assay(sce, "counts")[, 1:100]
+normalizados <- assay(sce, "logcounts")[, 1:100]
+par(mfrow = c(1, 2))
+hist(log1p(originales@x), breaks = 50, col = "grey70", main = "Antes: log1p(counts)", xlab = "Expresión")
+hist(normalizados@x, breaks = 50, col = "steelblue", main = "Después: LogNormalize manual", xlab = "Expresión")
+par(mfrow = c(1, 1))
+```
+
+```{r genes_variables, fig.width=7, fig.height=5}
+modelo <- modelGeneVar(sce)
+variables <- getTopHVGs(modelo, n = 2000)
+top10 <- head(variables, 10)
+top10
+cat("Genes variables compartidos:", length(intersect(variables, referencia$variables)), "\n")
+datos_var <- as.data.frame(modelo)
+datos_var$gen <- rownames(datos_var)
+datos_var$variable <- datos_var$gen %in% variables
+ggplot(datos_var, aes(mean, total, color = variable)) + geom_point(size = 0.3) +
+  geom_text(data = datos_var[match(top10, datos_var$gen), ], aes(label = gen), check_overlap = TRUE, size = 3) +
+  labs(x = "Media de expresión", y = "Varianza total") + theme_classic()
+```
+
+```{r calcular_pca}
+escalada <- scale(t(as.matrix(assay(sce, "logcounts")[variables, ])))
+escalada[escalada > 10] <- 10 # Mismo límite superior de ScaleData
+pca <- prcomp(escalada, center = TRUE, scale. = FALSE)
+reducedDim(sce, "PCA") <- pca$x[, 1:20]
+var_pct <- 100 * pca$sdev^2 / sum(pca$sdev^2)
+```
+
+```{r elbow_scree, fig.width=10, fig.height=4}
+par(mfrow = c(1, 2))
+plot(1:30, pca$sdev[1:30], type = "b", pch = 16, xlab = "PC", ylab = "Desviación estándar", main = "Elbow plot")
+plot(1:30, var_pct[1:30], type = "b", pch = 16, xlab = "PC", ylab = "Varianza explicada (%)", main = "Scree plot")
+par(mfrow = c(1, 1))
+```
+
+```{r varianza_acumulada}
+porcentaje <- 30
+cat("PC necesarios para", porcentaje, "%:", which(cumsum(var_pct) >= porcentaje)[1], "\n")
+```
+
+```{r pesos_pca, fig.width=12, fig.height=6}
+cargas <- data.frame(gen = rep(rownames(pca$rotation), 2), PC = rep(c("PC1", "PC2"), each = nrow(pca$rotation)),
+                     peso = as.vector(pca$rotation[, 1:2]))
+cargas <- cargas[order(abs(cargas$peso), decreasing = TRUE), ]
+top_cargas <- do.call(rbind, lapply(split(cargas, cargas$PC), head, 20))
+ggplot(top_cargas, aes(peso, reorder(gen, peso))) + geom_col(fill = "steelblue") +
+  facet_wrap(~PC, scales = "free_y") + labs(x = "Loading", y = "Gen") + theme_classic()
+```
+
+```{r clustering}
+grafo <- buildSNNGraph(sce, use.dimred = "PCA", k = 20, type = "jaccard")
+set.seed(42)
+sce$cluster <- factor(cluster_louvain(grafo, resolution = 0.5)$membership)
+nlevels(sce$cluster)
+```
+
+```{r tamano_clusters, fig.width=8, fig.height=4}
+tamano_clusters <- table(sce$cluster)
+tamano_clusters
+round(100 * prop.table(tamano_clusters), 1)
+barplot(tamano_clusters, col = "steelblue", xlab = "Cluster", ylab = "Células")
+```
+
+```{r comparar_umap, fig.width=15, fig.height=4}
+set.seed(42)
+reducedDim(sce, "UMAP") <- uwot::umap(reducedDim(sce, "PCA"), n_neighbors = 30, min_dist = 0.3, metric = "cosine", n_threads = 1)
+set.seed(42)
+reducedDim(sce, "UMAP50") <- uwot::umap(reducedDim(sce, "PCA"), n_neighbors = 50, min_dist = 0.5, metric = "cosine", n_threads = 1)
+set.seed(42)
+reducedDim(sce, "UMAP10") <- uwot::umap(reducedDim(sce, "PCA"), n_neighbors = 10, min_dist = 0.1, metric = "cosine", n_threads = 1)
+p1 <- plotReducedDim(sce, "UMAP", colour_by = "cluster", text_by = "cluster") + ggtitle("30 vecinos; min.dist = 0.3") + theme(legend.position = "none")
+p2 <- plotReducedDim(sce, "UMAP50", colour_by = "cluster", text_by = "cluster") + ggtitle("50 vecinos; min.dist = 0.5") + theme(legend.position = "none")
+p3 <- plotReducedDim(sce, "UMAP10", colour_by = "cluster", text_by = "cluster") + ggtitle("10 vecinos; min.dist = 0.1") + theme(legend.position = "none")
+p1 + p2 + p3
+```
+
+```{r comparar_tsne, fig.width=15, fig.height=4}
+set.seed(42)
+reducedDim(sce, "TSNE") <- Rtsne::Rtsne(reducedDim(sce, "PCA"), perplexity = 30, pca = FALSE, check_duplicates = FALSE)$Y
+set.seed(42)
+reducedDim(sce, "TSNE50") <- Rtsne::Rtsne(reducedDim(sce, "PCA"), perplexity = 50, pca = FALSE, check_duplicates = FALSE)$Y
+set.seed(42)
+reducedDim(sce, "TSNE10") <- Rtsne::Rtsne(reducedDim(sce, "PCA"), perplexity = 10, pca = FALSE, check_duplicates = FALSE)$Y
+p1 <- plotReducedDim(sce, "TSNE", colour_by = "cluster", text_by = "cluster") + ggtitle("Perplexity = 30") + theme(legend.position = "none")
+p2 <- plotReducedDim(sce, "TSNE50", colour_by = "cluster", text_by = "cluster") + ggtitle("Perplexity = 50") + theme(legend.position = "none")
+p3 <- plotReducedDim(sce, "TSNE10", colour_by = "cluster", text_by = "cluster") + ggtitle("Perplexity = 10") + theme(legend.position = "none")
+p1 + p2 + p3
+```
+
+```{r comparar_proyecciones, fig.width=12, fig.height=5}
+plotReducedDim(sce, "TSNE", colour_by = "cluster") + plotReducedDim(sce, "UMAP", colour_by = "cluster")
+```
+
+```{r comparar_qc, fig.width=12, fig.height=12}
+p1 <- plotReducedDim(sce, "TSNE", colour_by = "nFeature_RNA")
+p2 <- plotReducedDim(sce, "UMAP", colour_by = "nFeature_RNA")
+p3 <- plotReducedDim(sce, "TSNE", colour_by = "nCount_RNA")
+p4 <- plotReducedDim(sce, "UMAP", colour_by = "nCount_RNA")
+p5 <- plotReducedDim(sce, "TSNE", colour_by = "percent.mt")
+p6 <- plotReducedDim(sce, "UMAP", colour_by = "percent.mt")
+(p1 + p2) / (p3 + p4) / (p5 + p6)
+```
+
+```{r comparar_con_original}
+clusters_ref <- referencia$cluster[colnames(sce)]
+table(Original = clusters_ref, Sin_Seurat = sce$cluster)
+cat("Clusters originales:", nlevels(clusters_ref), "\nClusters sin Seurat:", nlevels(sce$cluster), "\n")
+cat("ARI:", compare(as.integer(clusters_ref), as.integer(sce$cluster), method = "adjusted.rand"), "\n")
+```
+
+```{r grilla_comparacion, fig.width=13, fig.height=14}
+tam_ref <- as.data.frame(table(clusters_ref))
+tam_nuevo <- as.data.frame(table(sce$cluster))
+colnames(tam_ref) <- colnames(tam_nuevo) <- c("cluster", "celulas")
+p1 <- ggplot(tam_ref, aes(cluster, celulas)) + geom_col(fill = "steelblue") + ggtitle("Clusters: original")
+p2 <- ggplot(tam_nuevo, aes(cluster, celulas)) + geom_col(fill = "tomato") + ggtitle("Clusters: sin Seurat")
+datos_umap <- setNames(data.frame(referencia$umap, cluster = referencia$cluster), c("x", "y", "cluster"))
+datos_tsne <- setNames(data.frame(referencia$tsne, cluster = referencia$cluster), c("x", "y", "cluster"))
+p3 <- ggplot(datos_umap, aes(x, y, color = cluster)) + geom_point(size = 0.2) + ggtitle("UMAP: original") + theme_classic() + theme(legend.position = "none")
+p4 <- plotReducedDim(sce, "UMAP", colour_by = "cluster") + ggtitle("UMAP: sin Seurat") + theme(legend.position = "none")
+p5 <- ggplot(datos_tsne, aes(x, y, color = cluster)) + geom_point(size = 0.2) + ggtitle("t-SNE: original") + theme_classic() + theme(legend.position = "none")
+p6 <- plotReducedDim(sce, "TSNE", colour_by = "cluster") + ggtitle("t-SNE: sin Seurat") + theme(legend.position = "none")
+grilla <- (p1 + p2) / (p3 + p4) / (p5 + p6)
+grilla
+```
+
+```{r guardar_resultados}
+dir.create("../output/opcional2", recursive = TRUE, showWarnings = FALSE)
+resultado_sin_seurat <- list(sce = sce, variables = variables, loadings = pca$rotation[, 1:10])
+save(resultado_sin_seurat, file = "../output/opcional2/brain_sin_seurat.RData", compress = "xz")
+ggsave("../output/opcional2/comparacion_sin_seurat.png", grilla, width = 13, height = 14, dpi = 150)
+```

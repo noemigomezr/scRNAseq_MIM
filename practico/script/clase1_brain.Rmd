@@ -1,0 +1,222 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r instalar, eval=FALSE}
+BiocManager::install("TENxBrainData")
+```
+
+```{r libraries}
+library(TENxBrainData)
+library(SingleCellExperiment)
+library(Seurat)
+library(Matrix)
+library(ggplot2)
+```
+
+```{r preparar_datos}
+# Descargar datos y seleccionar 3000 células
+sce <- TENxBrainData20k()
+set.seed(42)
+sce <- sce[, sample(ncol(sce), 3000)]
+
+# Asignar símbolos génicos; usar Ensembl cuando falte el símbolo
+simbolos <- as.character(rowData(sce)$Symbol)
+ensembl <- as.character(rowData(sce)$Ensembl)
+simbolos[is.na(simbolos) | simbolos == ""] <-
+  ensembl[is.na(simbolos) | simbolos == ""]
+rownames(sce) <- make.unique(simbolos)
+
+# Asignar identificadores celulares únicos
+colnames(sce) <- make.unique(
+  paste(colData(sce)$Library, colData(sce)$Barcode, sep = "_")
+)
+
+# Extraer matriz de UMI y crear objeto Seurat
+counts <- as(assay(sce, "counts"), "dgCMatrix")
+obj <- CreateSeuratObject(counts = counts, project = "Brain_E18")
+
+obj
+```
+
+```{r explorar_datos}
+cat("Células:", ncol(obj), "\nGenes:", nrow(obj), "\n")
+head(rownames(obj))
+head(colnames(obj))
+assayNames(sce)
+as.matrix(counts[1:5, 1:5])
+```
+
+```{r calcular_qc}
+genes_mt <- grep("^mt-", rownames(obj), value = TRUE)
+genes_mt
+
+obj[["percent.mt"]] <- PercentageFeatureSet(obj, features = genes_mt)
+metricas_qc <- c("nFeature_RNA", "nCount_RNA", "percent.mt")
+summary(obj[[]][, metricas_qc])
+```
+
+```{r violin_antes, fig.width=12, fig.height=6}
+VlnPlot(obj, features = metricas_qc, layer = "counts", ncol = 3, pt.size = 0.1) + NoLegend()
+```
+
+```{r scatter_antes, fig.width=10, fig.height=4}
+plot1 <- FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + NoLegend()
+plot2 <- FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "percent.mt") + NoLegend()
+plot1 + plot2
+```
+
+```{r filtrar_qc}
+antes <- c(Celulas = ncol(obj), Genes = nrow(obj),
+           Genes_detectados = sum(Matrix::rowSums(counts) > 0))
+obj <- subset(obj, subset = nFeature_RNA > 300 & nFeature_RNA < 5000 & percent.mt < 10)
+despues <- c(Celulas = ncol(obj), Genes = nrow(obj),
+             Genes_detectados = sum(Matrix::rowSums(GetAssayData(obj, layer = "counts")) > 0))
+data.frame(Antes = antes, Despues = despues, Eliminados = antes - despues,
+           Perdida_pct = round(100 * (antes - despues) / antes, 2))
+summary(obj[[]][, metricas_qc])
+```
+
+```{r violin_despues, fig.width=12, fig.height=6}
+VlnPlot(obj, features = metricas_qc, layer = "counts", ncol = 3, pt.size = 0.1) + NoLegend()
+```
+
+```{r scatter_despues, fig.width=10, fig.height=4}
+plot1 <- FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + NoLegend()
+plot2 <- FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "percent.mt") + NoLegend()
+plot1 + plot2
+```
+
+```{r normalizacion, fig.width=10, fig.height=4}
+obj <- NormalizeData(obj, verbose = FALSE)
+celdas <- head(colnames(obj), 100)
+originales <- GetAssayData(obj, layer = "counts")[, celdas]
+normalizados <- GetAssayData(obj, layer = "data")[, celdas]
+par(mfrow = c(1, 2))
+hist(log1p(originales@x), breaks = 50, col = "grey70", main = "Antes: log1p(counts)", xlab = "Expresión")
+hist(normalizados@x, breaks = 50, col = "steelblue", main = "Después: LogNormalize", xlab = "Expresión")
+```
+
+```{r genes_variables, fig.width=7, fig.height=5}
+obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+top10 <- head(VariableFeatures(obj), 10)
+top10
+LabelPoints(plot = VariableFeaturePlot(obj), points = top10, repel = TRUE) + NoLegend()
+```
+
+```{r calcular_pca}
+obj <- ScaleData(obj, 
+                 features = VariableFeatures(obj), 
+                 verbose = FALSE)
+obj <- RunPCA(obj, 
+              features = VariableFeatures(obj), 
+              npcs = 2000, approx = FALSE, 
+              verbose = FALSE)
+```
+
+```{r elbow_pca, fig.width=7, fig.height=4}
+ElbowPlot(obj, ndims = 30)
+```
+
+```{r scree_pca, fig.width=7, fig.height=4}
+var_pct <- 100 * Stdev(obj, reduction = "pca")^2 / sum(Stdev(obj, reduction = "pca")^2)
+plot(1:30, var_pct[1:30], type = "b", pch = 16,
+     xlab = "PC", ylab = "Varianza explicada (%)", main = "Scree plot: PC 1 a 30")
+```
+
+```{r varianza_acumulada}
+porcentaje <- 30 # Porcentaje de varianza que buscamos explicar
+var_acumulada <- cumsum(var_pct)
+n_pc <- which(var_acumulada >= porcentaje)[1]
+cat("Para explicar al menos", porcentaje, "% de la varianza se necesitan", n_pc, "PC.\n")
+```
+
+```{r pesos_pca, fig.width=10, fig.height=5}
+VizDimLoadings(obj, dims = 1:2, reduction = "pca")
+```
+
+```{r clustering}
+obj <- FindNeighbors(obj, dims = 1:20, verbose = FALSE)
+obj <- FindClusters(obj, resolution = 0.5, random.seed = 42, verbose = FALSE)
+head(Idents(obj), 5)
+nlevels(Idents(obj)) # Número de clusters
+```
+
+```{r tamano_clusters, fig.width=8, fig.height=4}
+tamano_clusters <- table(Idents(obj))
+tamano_clusters
+round(100 * prop.table(tamano_clusters), 1) # Porcentaje por cluster
+barplot(tamano_clusters, col = "steelblue", 
+        xlab = "Cluster", ylab = "Células")
+```
+
+```{r comparar_umap, fig.width=21, fig.height=7}
+obj <- RunUMAP(obj, dims = 1:20, n.neighbors = 30, min.dist = 0.3, seed.use = 42, verbose = FALSE)
+obj <- RunUMAP(obj, dims = 1:20, n.neighbors = 50, min.dist = 0.5, seed.use = 42, verbose = FALSE, reduction.name = "umap50")
+obj <- RunUMAP(obj, dims = 1:20, n.neighbors = 10, min.dist = 0.1, seed.use = 42, verbose = FALSE, reduction.name = "umap10")
+plot1 <- DimPlot(obj, reduction = "umap", label = TRUE) + ggtitle("Vecinos = 30; min.dist = 0.3") + NoLegend()
+plot2 <- DimPlot(obj, reduction = "umap50", label = TRUE) + ggtitle("Vecinos = 50; min.dist = 0.5") + NoLegend()
+plot3 <- DimPlot(obj, reduction = "umap10", label = TRUE) + ggtitle("Vecinos = 10; min.dist = 0.1") + NoLegend()
+plot1 + plot2 + plot3
+```
+
+```{r comparar_tsne, fig.width=15, fig.height=4}
+obj <- RunTSNE(obj, dims = 1:20, perplexity = 30, seed.use = 42, verbose = FALSE)
+obj <- RunTSNE(obj, dims = 1:20, perplexity = 50, seed.use = 42, verbose = FALSE, reduction.name = "tsne50")
+obj <- RunTSNE(obj, dims = 1:20, perplexity = 10, seed.use = 42, verbose = FALSE, reduction.name = "tsne10")
+plot1 <- DimPlot(obj, reduction = "tsne", label = TRUE) + ggtitle("Perplexity = 30") + NoLegend()
+plot2 <- DimPlot(obj, reduction = "tsne50", label = TRUE) + ggtitle("Perplexity = 50") + NoLegend()
+plot3 <- DimPlot(obj, reduction = "tsne10", label = TRUE) + ggtitle("Perplexity = 10") + NoLegend()
+plot1 + plot2 + plot3
+```
+
+```{r comparar_proyecciones, fig.width=12, fig.height=5}
+plot1 <- DimPlot(obj, reduction = "tsne", label = TRUE) + ggtitle("t-SNE") + NoLegend()
+plot2 <- DimPlot(obj, reduction = "umap", label = TRUE) + ggtitle("UMAP") + NoLegend()
+plot1 + plot2
+```
+
+```{r comparar_qc, fig.width=12, fig.height=12}
+plot1 <- FeaturePlot(obj, features = metricas_qc, 
+                     reduction = "tsne", ncol = 1)
+plot2 <- FeaturePlot(obj, features = metricas_qc, 
+                     reduction = "umap", ncol = 1)
+plot1 | plot2
+```
+
+```{r, fig.width=20, fig.height=6}
+VlnPlot(obj, features = metricas_qc, layer = "counts", ncol = 3, pt.size = 0.1) + NoLegend()
+```
+
+```{r guardar_referencia}
+dir.create("../output", recursive = TRUE, showWarnings = FALSE)
+anotacion <- as.data.frame(rowData(sce)[, c("Ensembl", "Symbol")])
+stopifnot(nrow(anotacion) == nrow(obj))
+anotacion$feature <- rownames(obj)
+referencia <- list(
+  counts = GetAssayData(obj, layer = "counts"),
+  normalizados = GetAssayData(obj, layer = "data"),
+  qc = obj[[]][, metricas_qc], genes = anotacion,
+  variables = VariableFeatures(obj),
+  pca = Embeddings(obj, "pca")[, 1:30],
+  stdev = Stdev(obj, "pca"), loadings = Loadings(obj, "pca")[, 1:10],
+  cluster = Idents(obj), umap = Embeddings(obj, "umap"), tsne = Embeddings(obj, "tsne"),
+  parametros = list(PC = 20, resolucion = 0.5, semilla = 42),
+  seurat_version = as.character(packageVersion("Seurat"))
+)
+save(referencia, file = "../output/brain_referencia.RData", compress = "xz")
+```
+
+```{r comparar_ratones, fig.width=15, fig.height=5}
+metadata_sce <- as.data.frame(colData(sce))
+obj$raton <- factor(metadata_sce[colnames(obj), "Mouse"], levels = c("A", "B"))
+stopifnot(!anyNA(obj$raton))
+table(Raton = obj$raton) # Células de cada ratón después del filtro de QC
+
+VlnPlot(obj, features = metricas_qc, group.by = "raton",
+        layer = "counts", ncol = 3, pt.size = 0.1)
+
+plot1 <- DimPlot(obj, reduction = "tsne", group.by = "raton") + ggtitle("t-SNE por ratón")
+plot2 <- DimPlot(obj, reduction = "umap", group.by = "raton") + ggtitle("UMAP por ratón")
+plot1 + plot2
+```

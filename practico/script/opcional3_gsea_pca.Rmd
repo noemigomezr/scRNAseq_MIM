@@ -1,0 +1,101 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r instalar, eval=FALSE}
+BiocManager::install("fgsea")
+install.packages(c("msigdbr", "ggplot2", "patchwork"))
+```
+
+```{r libraries}
+library(fgsea)
+library(msigdbr)
+library(ggplot2)
+library(patchwork)
+stopifnot(file.exists("../output/brain_referencia.RData"))
+load("../output/brain_referencia.RData")
+dir.create("../output/opcional3", recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r cargas_pca}
+cargas <- referencia$loadings[, 1:10]
+anotacion <- referencia$genes[match(rownames(cargas), referencia$genes$feature), ]
+ids <- sub("[.][0-9]+$", "", as.character(anotacion$Ensembl))
+cat("Genes en el PCA:", nrow(cargas), "\nPC:", ncol(cargas), "\n")
+head(cbind(anotacion[, c("feature", "Ensembl", "Symbol")], cargas[, 1:2]))
+write.table(cbind(anotacion[, c("feature", "Ensembl", "Symbol")], cargas),
+            "../output/opcional3/loadings_PC1_PC10.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+```{r gobp_mouse}
+gobp <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M5", subcollection = "GO:BP")
+gobp <- gobp[!is.na(gobp$ensembl_gene) & gobp$ensembl_gene != "", ]
+conjuntos <- lapply(split(gobp$ensembl_gene, gobp$gs_name), unique)
+cat("Versión MSigDB:", unique(gobp$db_version), "\nConjuntos GO:BP:", length(conjuntos), "\n")
+cat("Genes del PCA presentes en GO:BP:", sum(ids %in% gobp$ensembl_gene), "de", length(ids), "\n")
+gobp_mouse <- list(version = unique(gobp$db_version), pathways = conjuntos)
+save(gobp_mouse, file = "../output/opcional3/gobp_mouse.RData", compress = "xz")
+```
+
+```{r gsea_por_pc}
+rankings <- resultados <- list()
+for (pc in 1:10) {
+  nombre_pc <- paste0("PC", pc)
+  ranking <- setNames(cargas[, pc], ids)
+  ranking <- ranking[is.finite(ranking) & !is.na(names(ranking)) & names(ranking) != ""]
+  ranking <- ranking[order(abs(ranking), decreasing = TRUE)]
+  ranking <- ranking[!duplicated(names(ranking))]
+  ranking <- sort(ranking, decreasing = TRUE)
+  rankings[[nombre_pc]] <- ranking
+  write.table(data.frame(Ensembl = names(ranking), peso = unname(ranking)),
+              paste0("../output/opcional3/", nombre_pc, "_ranking.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+  set.seed(42 + pc)
+  resultado <- as.data.frame(fgseaMultilevel(pathways = conjuntos, stats = ranking,
+                                           minSize = 15, maxSize = 500, eps = 0, nPermSimple = 10000,
+                                           BPPARAM = BiocParallel::SerialParam()))
+  resultado$PC <- nombre_pc
+  resultados[[nombre_pc]] <- resultado[order(resultado$padj), ]
+  cat(nombre_pc, ":", length(ranking), "genes;", sum(resultado$padj < 0.05, na.rm = TRUE),
+      "términos con FDR por PC < 0.05;", sum(is.na(resultado$pval)), "términos sin p-value estimable\n")
+}
+```
+
+```{r guardar_gsea}
+tabla <- do.call(rbind, resultados)
+tabla$padj_global <- p.adjust(tabla$pval, method = "BH")
+tabla$PC <- factor(tabla$PC, levels = paste0("PC", 1:10))
+gsea_pca <- list(rankings = rankings, resultados = resultados, tabla = tabla,
+                 version_msigdb = unique(gobp$db_version))
+save(gsea_pca, file = "../output/opcional3/gsea_PC1_PC10.RData", compress = "xz")
+exportar <- tabla
+exportar$leadingEdge <- vapply(exportar$leadingEdge, paste, character(1), collapse = ";")
+write.table(exportar, "../output/opcional3/GSEA_GOBP_PC1_PC10.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+head(tabla[order(tabla$padj_global), c("PC", "pathway", "NES", "pval", "padj", "padj_global", "size")], 20)
+```
+
+```{r resumen_gsea, fig.width=14, fig.height=18}
+significativos <- tabla[!is.na(tabla$padj_global) & tabla$padj_global < 0.05, ]
+significativos <- significativos[order(significativos$padj_global), ]
+if (nrow(significativos) > 0) {
+  mostrar <- do.call(rbind, lapply(split(significativos, significativos$PC, drop = TRUE), head, 5))
+  mostrar$termino <- substr(gsub("_", " ", sub("^GOBP_", "", mostrar$pathway)), 1, 55)
+  grilla <- ggplot(mostrar, aes(NES, reorder(termino, NES), color = -log10(padj_global), size = size)) +
+    geom_point() + geom_vline(xintercept = 0, linetype = 2, color = "grey60") +
+    facet_wrap(~PC, scales = "free_y", ncol = 2) + theme_bw() +
+    labs(x = "NES", y = NULL, color = "-log10(FDR global)", size = "Genes")
+  print(grilla)
+  ggsave("../output/opcional3/resumen_GSEA.png", grilla, width = 14, height = 18, dpi = 150)
+} else {
+  cat("No se encontraron términos GO:BP con FDR global < 0.05. Revisar la tabla completa.\n")
+}
+```
+
+```{r curva_enriquecimiento, fig.width=10, fig.height=5}
+pc_ejemplo <- "PC1"
+tabla_pc <- resultados[[pc_ejemplo]]
+if (nrow(tabla_pc) > 0 && is.finite(tabla_pc$padj[1])) {
+  via <- tabla_pc$pathway[1]
+  plotEnrichment(conjuntos[[via]], rankings[[pc_ejemplo]]) +
+    labs(title = paste(pc_ejemplo, via), subtitle = paste("FDR por PC =", signif(tabla_pc$padj[1], 3)))
+}
+```

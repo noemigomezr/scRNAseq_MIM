@@ -7,8 +7,8 @@ BiocManager::install("TENxBrainData")
 ```
 
 ```{r libraries}
-library(TENxBrainData)
 library(SingleCellExperiment)
+library(TENxBrainData)
 library(Seurat)
 library(Matrix)
 library(ggplot2)
@@ -38,3 +38,110 @@ obj <- CreateSeuratObject(counts = counts, project = "Brain_E18")
 
 obj
 ```
+```{r}
+rownames(obj)[1:10]
+genes_mt <- grep("^mt-", rownames(obj), value = TRUE)
+obj[["percent.mt"]] <- PercentageFeatureSet(obj, features = genes_mt)
+
+summary(obj[[]])
+```
+```{r, fig.width=12, fig.height=6}
+VlnPlot(obj, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), layer = "counts", ncol = 3, pt.size = 0.1)
+```
+```{r, fig.width=10, fig.height=4}
+FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") |
+  FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "percent.mt")
+```
+
+```{r}
+antes <- c(Celulas = ncol(obj), Genes = nrow(obj), 
+           Genes_detectados = sum(Matrix::rowSums(counts) > 0))
+antes
+
+obj <- subset(obj, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent.mt < 10)
+despues <- c(Celulas = ncol(obj), Genes = nrow(obj), 
+           Genes_detectados = sum(Matrix::rowSums(counts) > 0))
+despues
+```
+
+```{r, fig.width=12, fig.height=6}
+VlnPlot(obj, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), layer = "counts", ncol = 3, pt.size = 0.1)
+```
+```{r, fig.width=10, fig.height=4}
+FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") |
+  FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "percent.mt")
+```
+
+```{r}
+original <- GetAssayData(obj, layer = "counts")[, colnames(obj)]
+obj <- NormalizeData(obj, normalization.method = "LogNormalize")
+normalizados <- GetAssayData(obj, layer = "data")[, colnames(obj)]
+
+hist(original@x, breaks = 50) | 
+hist(normalizados@x, breaks = 50)
+```
+```{r}
+obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 2000)
+top10 <- head(VariableFeatures(obj),10)
+top10
+
+LabelPoints(plot = VariableFeaturePlot(obj), points = top10, repel = TRUE)
+obj <- ScaleData(obj, features = VariableFeatures(obj))
+
+obj <- RunPCA(obj, features = VariableFeatures(obj), npcs = 2000, approx = FALSE)
+```
+
+```{r}
+ElbowPlot(obj, ndims = 50)
+VizDimLoadings(obj, dims = 1:2)
+```
+```{r}
+obj <- FindNeighbors(obj, dims = 1:20)
+obj <- FindClusters(obj, resolution = 0.5, random.seed = 42)
+```
+
+```{r}
+table(Idents(obj))
+prop.table(table(Idents(obj)))
+barplot(table(Idents(obj)))
+```
+
+```{r, fig.width=12, fig.height=5}
+obj <- RunUMAP(obj, dims = 1:20, n.neighbors = 30, min.dist = 0.3, set.seed = 42)
+DimPlot(obj, reduction = "umap", label = TRUE)
+
+obj <- RunUMAP(obj, dims = 1:20, n.neighbors = 30, min.dist = 0.1, set.seed = 42, reduction.name = "umap1")
+DimPlot(obj, reduction = "umap", label = TRUE) | DimPlot(obj, reduction = "umap1", label = TRUE)
+
+obj <- RunUMAP(obj, dims = 1:20, n.neighbors = 10, min.dist = 0.3, set.seed = 42, reduction.name = "umap2")
+DimPlot(obj, reduction = "umap", label = TRUE) | DimPlot(obj, reduction = "umap2", label = TRUE)
+```
+```{r, fig.width=12, fig.height=4}
+obj <- RunTSNE(obj, dims = 1:20, set.seed = 42, perplexity = 30)
+DimPlot(obj, reduction = "tsne", label = TRUE)
+
+obj <- RunTSNE(obj, dims = 1:20, set.seed = 42, perplexity = 80, reduction.name = "tsne1")
+DimPlot(obj, reduction = "tsne", label = TRUE) | DimPlot(obj, reduction = "tsne1", label = TRUE)
+
+obj <- RunTSNE(obj, dims = 1:20, set.seed = 42, perplexity = 10, reduction.name = "tsne2")
+DimPlot(obj, reduction = "tsne", label = TRUE) | DimPlot(obj, reduction = "tsne2", label = TRUE)
+
+DimPlot(obj, reduction = "tsne", label = TRUE) | DimPlot(obj, reduction = "umap", label = TRUE)
+```
+
+```{r}
+FeaturePlot(obj, features = "nCount_RNA", reduction = "umap")
+```
+
+```{r, fig.width=20, fig.height=5}
+VlnPlot(obj, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), layer = "counts", ncol = 3, pt.size = 0.1)
+```
+```{r}
+metadata <- as.data.frame(colData(sce))
+obj$raton <- factor(metadata[colnames(obj), "Mouse"], levels = c("A", "B"))
+table(obj$raton)
+
+VlnPlot(obj, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), layer = "counts", ncol = 3, pt.size = 0.1, group.by = "raton")
+DimPlot(obj, reduction = "umap", group.by = "raton")
+```
+
