@@ -1,0 +1,37 @@
+---
+title: "Single-cell RNA-seq II: preparación para pseudobulk"
+author: "Noemi Gomez"
+date: "07 de noviembre de 2026"
+output: html_document
+---
+
+```{r instalar_paquetes, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install("muscData")
+```
+
+```{r librerias}
+library(Seurat)
+library(muscData)
+library(SingleCellExperiment)
+library(tidyverse)
+```
+
+```{r cargar_datos}
+sce <- Kang18_8vs8()
+obj <- CreateSeuratObject(counts = counts(sce), meta.data = as.data.frame(colData(sce)),
+                          project = "Kang_IFNb", min.cells = 3, min.features = 200)
+```
+
+```{r preparar_metadatos}
+obj$donor_id <- as.character(obj$ind)
+obj$condition <- toupper(as.character(obj$stim))
+obj$cell_type <- as.character(obj$cell)
+obj$sample_id <- paste(obj$donor_id, obj$condition, sep = "_")
+```
+
+```{r resumen_dataset}
+cat("Células del dataset:", ncol(sce), "\nCélulas tras el filtro inicial:", ncol(obj),
+    "\nPacientes en total:", n_distinct(obj$donor_id), "\n")
+obj[[]] %>% distinct(donor_id, condition) %>% count(condition, name = "pacientes")
+```

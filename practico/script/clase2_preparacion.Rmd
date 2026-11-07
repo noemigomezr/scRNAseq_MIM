@@ -1,0 +1,38 @@
+---
+title: "Single-cell RNA-seq II: cerebro embrionario"
+author: "Noemi Gomez"
+date: "03 de noviembre de 2026"
+output: html_document
+---
+
+```{r instalar_referencia, eval=FALSE}
+BiocManager::install("scRNAseq", update = FALSE, ask = FALSE)
+```
+
+```{r libraries}
+library(SingleCellExperiment)
+library(Seurat)
+library(tidyverse)
+```
+
+```{r cargar_clase1}
+load("../output/clase1_clustering.RData")
+```
+
+```{r instalar_referencia, eval=FALSE}
+BiocManager::install("scRNAseq", update = FALSE, ask = FALSE)
+```
+
+```{r cargar_referencia}
+library(scRNAseq)
+
+# Referencia de mesencéfalo embrionario de ratón
+sce_ref <- LaMannoBrainData("mouse-embryo", ensembl = FALSE, location = FALSE)
+sce_ref <- sce_ref[, !is.na(sce_ref$Cell_type)]
+rownames(sce_ref) <- make.unique(rownames(sce_ref))
+
+referencia <- CreateSeuratObject(counts = as(assay(sce_ref, "counts"), "dgCMatrix"),
+                                 project = "LaManno")
+referencia$cell_type <- as.character(sce_ref$Cell_type)
+table(referencia$cell_type)
+```
