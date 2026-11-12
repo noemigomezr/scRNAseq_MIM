@@ -35,3 +35,34 @@ cat("Células del dataset:", ncol(sce), "\nCélulas tras el filtro inicial:", nc
     "\nPacientes en total:", n_distinct(obj$donor_id), "\n")
 obj[[]] %>% distinct(donor_id, condition) %>% count(condition, name = "pacientes")
 ```
+```{r}
+pseudo <- AggregateExpression(obj, assays = "RNA", group.by = c("sample_id", "condition","cell_type"))$RNA
+dim(pseudo)
+as.matrix(pseudo[1:10, 1:6])
+```
+
+```{r}
+meta_pb <- obj[[]] %>%
+  count(condition, sample_id, cell_type, donor_id, name = "n_cells")
+# Seurat reemplaza los guiones bajos dentro de cada etiqueta por guiones
+
+# rownames(meta_pb) <- with(meta_pb, paste(condition, gsub("_", "-", sample_id),
+#                                       gsub("_", "-", cell_type), sep = "_"))
+
+rownames(meta_pb) <- with(meta_pb, paste(paste0("g",gsub("_","-",sample_id)), 
+                                         condition, gsub("_", "-", cell_type), sep = "_"))
+
+meta_pb <- meta_pb[colnames(pseudo), ]
+meta_pb$condition <- factor(meta_pb$condition, levels = c("CTRL", "STIM"))
+head(meta_pb)
+```
+
+```{r}
+coldata <- subset(meta_pb, cell_type = "CD14+ Monocytes" & n_cells >= 20,
+                  select = c(donor_id,condition,sample_id,n_cells))
+coldata$donor_id <- factor(coldata$donor_id)
+
+counts_mono <- as.matrix(pseudo[, rownames(coldata), drop = FALSE])
+table(coldata$donor_id, coldata$condition)
+```
+

@@ -1,0 +1,199 @@
+---
+title: "Single-cell RNA-seq II: cerebro embrionario"
+author: "Noemi Gomez"
+date: "03 de noviembre de 2026"
+output: html_document
+---
+
+```{r libraries}
+library(SingleCellExperiment)
+library(Seurat)
+library(tidyverse)
+```
+
+```{r cargar_clase1}
+load("../output/clase1_clustering.RData")
+table(Idents(obj))
+DimPlot(obj, reduction = "umap", label = TRUE)
+```
+
+
+```{r}
+# Comparar el clúster 0 con el resto
+markers_0 <- FindMarkers(obj, ident.1 = "0",
+                         only.pos = TRUE, min.pct = 0.25,
+                         logfc.threshold = 0.25)
+
+markers_0_fdr <- subset(markers_0, subset = p_val_adj < 0.05 & avg_log2FC > 1)
+markers_0_fdr %>% arrange(desc(avg_log2FC)) %>% slice_head(n=1)
+FeaturePlot(obj, features = "Fam84a", reduction = "umap")
+VlnPlot(obj, features = "Fam84a", pt.size = 0.1)
+```
+
+```{r}
+markers <- FindAllMarkers(obj, only.pos = TRUE,
+                          min.pct = 0.25,logfc.threshold = 0.25)
+head(markers)
+
+# cuantos marcadores se identificaron por cluster
+markers %>% filter(p_val_adj < 0.05) %>% count(cluster, name = "n_markers")
+```
+
+```{r seleccionar_marcadores}
+# Seleccionar marcadores candidatos
+markers_sig <- markers %>%
+  filter(p_val_adj < 0.05, pct.1 > pct.2)
+
+# Seleccionar los 3 genes con mayor log2FC por clúster
+top3 <- markers_sig %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 3, with_ties = FALSE) %>%
+  ungroup()
+
+top3 %>%
+  select(cluster, gene, avg_log2FC, pct.1, pct.2, p_val_adj)
+
+genes_plot <- unique(top3$gene)
+```
+
+```{r dotplot_marcadores, fig.width=14, fig.height=7}
+DotPlot(obj, features = genes_plot) + RotatedAxis()
+```
+
+```{r umap_marcador, fig.width=7, fig.height=6}
+gen <- genes_plot[1]
+FeaturePlot(obj, features = gen, reduction = "umap")
+```
+
+```{r violin_marcador, fig.width=12, fig.height=4}
+VlnPlot(obj, features = gen, pt.size = 0)
+```
+
+```{r heatmap_marcadores, fig.width=14, fig.height=8}
+obj_heatmap <- ScaleData(obj, features = genes_plot, verbose = FALSE)
+DoHeatmap(obj_heatmap, features = genes_plot) + NoLegend()
+```
+
+```{r instalar_referencia, eval=FALSE}
+BiocManager::install("scRNAseq", update = FALSE, ask = FALSE)
+```
+
+```{r cargar_referencia}
+library(scRNAseq)
+
+# Referencia de mesencéfalo embrionario de ratón
+sce_ref <- LaMannoBrainData("mouse-embryo", ensembl = FALSE, location = FALSE)
+sce_ref <- sce_ref[, !is.na(sce_ref$Cell_type)]
+rownames(sce_ref) <- make.unique(rownames(sce_ref))
+
+referencia <- CreateSeuratObject(counts = as(assay(sce_ref, "counts"), "dgCMatrix"),
+                                 project = "LaManno")
+referencia$cell_type <- as.character(sce_ref$Cell_type)
+table(referencia$cell_type)
+```
+
+```{r preparar_referencia}
+referencia <- NormalizeData(referencia, verbose = FALSE)
+referencia <- FindVariableFeatures(referencia, verbose = FALSE)
+referencia <- ScaleData(referencia, verbose = FALSE)
+referencia <- RunPCA(referencia, npcs = 30, verbose = FALSE)
+```
+
+```{r buscar_anchors}
+DefaultAssay(obj) <- "RNA"
+Idents(obj) <- "seurat_clusters"
+length(intersect(rownames(obj), rownames(referencia)))
+
+anchors <- FindTransferAnchors(reference = referencia, query = obj,
+                                reference.reduction = "pca", dims = 1:20)
+```
+
+```{r transferir_identidades}
+pred <- TransferData(anchorset = anchors,
+                     refdata = referencia$cell_type, dims = 1:20)
+obj <- AddMetaData(obj, metadata = pred)
+obj$cell_type <- obj$predicted.id
+```
+
+```{r visualizar_anotacion, fig.width=12, fig.height=6}
+DimPlot(obj, reduction = "umap", group.by = "cell_type", label = TRUE, repel = TRUE)
+```
+
+```{r concordancia_clusters}
+concordancia <- prop.table(table(Cluster = obj$seurat_clusters,
+                                Tipo_predicho = obj$cell_type), margin = 1) * 100
+round(concordancia, 1)
+```
+
+```{r heatmap_anotacion, fig.width=12, fig.height=6}
+porcentajes <- as.data.frame(concordancia)
+ggplot(porcentajes, aes(Cluster, Tipo_predicho, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "#377EB8", mid = "white", high = "#E41A1C",
+                       midpoint = 50, limits = c(0, 100), breaks = c(0, 50, 100), name = "% células") +
+  labs(x = "Cluster", y = "Tipo predicho") + theme_minimal()
+```
+
+```{r confianza_violin, fig.width=12, fig.height=5}
+# El puntaje de transferencia no es una probabilidad calibrada
+summary(obj$prediction.score.max)
+VlnPlot(obj, features = "prediction.score.max", group.by = "seurat_clusters", pt.size = 0)
+```
+
+```{r confianza_umap, fig.width=12, fig.height=6}
+FeaturePlot(obj, features = "prediction.score.max", reduction = "umap") |
+  FeaturePlot(obj, features = "prediction.score.max", reduction = "tsne")
+```
+
+
+```{r clases_generales}
+grupos <- c(
+  mNbM = "Neuroblastos", mNbML2 = "Neuroblastos",
+  mNbL2 = "Neuroblastos", mNbDA = "Neuroblastos",
+  mNProg = "Progenitores neuronales",
+  mRgl1 = "Glía radial", mRgl2 = "Glía radial",
+  mEpen = "Ependimarias", mMgl = "Microglía",
+  mEndo = "Vasculares", mPeric = "Vasculares", mUnk = "No asignadas"
+)
+obj$cell_class <- unname(grupos[obj$cell_type])
+```
+
+```{r umap_clases, fig.width=12, fig.height=6}
+DimPlot(obj, reduction = "umap", group.by = "cell_class", label = TRUE, repel = TRUE)
+```
+
+```{r recuperar_raton}
+metadata <- as.data.frame(colData(sce))
+# Los nombres de fila conservan Library_Barcode, igual que colnames(obj)
+idx <- match(colnames(obj), rownames(metadata))
+stopifnot(!anyNA(idx))
+obj$Mouse <- as.character(metadata$Mouse[idx])
+table(obj$Mouse)
+```
+
+```{r composicion_celular}
+conteos <- table(Muestra = obj$Mouse, Tipo_celular = obj$cell_class)
+conteos
+proporciones <- prop.table(conteos, margin = 1) * 100
+round(proporciones, 1)
+```
+
+```{r barras_composicion, fig.width=9, fig.height=6}
+comp <- as.data.frame(prop.table(conteos, margin = 1))
+ggplot(comp, aes(Muestra, Freq, fill = Tipo_celular)) +
+  geom_col(color = "white", width = 0.7) +
+  scale_y_continuous(labels = scales::label_percent(accuracy = 1)) +
+  labs(x = "Ratón", y = "Proporción celular", fill = "Tipo celular") + theme_minimal()
+```
+
+```{r generar_pseudobulk}
+pseudo <- AggregateExpression(
+  object = obj,
+  assays = "RNA",
+  group.by = c("Mouse", "cell_type"),
+  return.seurat = FALSE
+)$RNA
+dim(pseudo)
+as.matrix(pseudo[1:10, 1:6])
+```
+

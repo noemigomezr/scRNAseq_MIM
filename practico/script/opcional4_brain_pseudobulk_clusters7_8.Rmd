@@ -1,0 +1,169 @@
+---
+title: "Opcional: pseudobulk de mNbML2 en los clústeres 7 y 8"
+author: "Noemi Gomez"
+date: "07 de noviembre de 2026"
+output: html_document
+---
+
+```{r instalar_paquetes, eval=FALSE}
+BiocManager::install(c("scRNAseq", "DESeq2"))
+```
+
+```{r librerias}
+library(SingleCellExperiment)
+library(Seurat)
+library(scRNAseq)
+library(tidyverse)
+library(DESeq2)
+```
+
+```{r cargar_datos}
+load("../output/clase1_clustering.RData")
+obj$Mouse <- as.character(sce$Mouse[match(colnames(obj), colnames(sce))])
+```
+
+```{r cargar_referencia}
+# Misma referencia y anotación que en clase2_brain.Rmd
+sce_ref <- LaMannoBrainData("mouse-embryo", ensembl = FALSE, location = FALSE)
+sce_ref <- sce_ref[, !is.na(sce_ref$Cell_type)]
+rownames(sce_ref) <- make.unique(rownames(sce_ref))
+referencia <- CreateSeuratObject(counts = as(assay(sce_ref, "counts"), "dgCMatrix"),
+                                 project = "LaManno")
+referencia$cell_type <- as.character(sce_ref$Cell_type)
+```
+
+```{r preparar_referencia}
+referencia <- NormalizeData(referencia, verbose = FALSE)
+referencia <- FindVariableFeatures(referencia, verbose = FALSE)
+referencia <- ScaleData(referencia, verbose = FALSE)
+referencia <- RunPCA(referencia, npcs = 30, verbose = FALSE)
+```
+
+```{r anotar_celulas}
+DefaultAssay(obj) <- "RNA"
+anchors <- FindTransferAnchors(reference = referencia, query = obj,
+                                reference.reduction = "pca", dims = 1:20)
+pred <- TransferData(anchorset = anchors, refdata = referencia$cell_type, dims = 1:20)
+obj <- AddMetaData(obj, metadata = pred)
+obj$cell_type <- obj$predicted.id
+```
+
+```{r composicion_clusters}
+obj_78 <- subset(obj, subset = seurat_clusters %in% c("7", "8"))
+obj_78$cluster <- paste0("C", obj_78$seurat_clusters)
+table(obj_78$Mouse, obj_78$cluster)
+comp <- obj_78[[]] %>%
+  count(Mouse, cluster, cell_type, name = "n_celulas") %>%
+  group_by(Mouse, cluster) %>%
+  mutate(proporcion = n_celulas / sum(n_celulas)) %>%
+  ungroup()
+comp %>% group_by(Mouse, cluster) %>% slice_max(n_celulas, n = 1, with_ties = FALSE)
+```
+
+```{r barras_composicion, fig.width=10, fig.height=6}
+ggplot(comp, aes(cluster, proporcion, fill = cell_type)) +
+  geom_col() + facet_wrap(~ Mouse, labeller = label_both) +
+  scale_y_continuous(labels = scales::label_percent()) +
+  labs(x = "Clúster", y = "Proporción celular", fill = "Tipo predicho") + theme_classic()
+```
+
+```{r seleccionar_tipo_celular}
+tipo <- "mNbML2"
+obj_tipo <- subset(obj_78, subset = cell_type == tipo)
+table(obj_tipo$Mouse, obj_tipo$cluster)
+```
+
+```{r generar_pseudobulk}
+pseudo <- AggregateExpression(obj_tipo, assays = "RNA", group.by = c("Mouse", "cluster"),
+                              return.seurat = FALSE)$RNA
+meta_pb <- obj_tipo[[]] %>% count(Mouse, cluster, name = "n_cells")
+rownames(meta_pb) <- paste(meta_pb$Mouse, meta_pb$cluster, sep = "_")
+meta_pb <- meta_pb[colnames(pseudo), ]
+meta_pb
+dim(pseudo)
+as.matrix(pseudo[1:10, ])
+```
+
+```{r seleccionar_perfiles}
+# Umbral editable; no dividir células para crear réplicas artificiales
+min_celulas <- 20
+coldata <- subset(meta_pb, n_cells >= min_celulas)
+tab <- table(coldata$Mouse, factor(coldata$cluster, levels = c("C7", "C8")))
+tab
+ratones <- rownames(tab)[rowSums(tab > 0) == 2]
+coldata <- coldata[coldata$Mouse %in% ratones, ]
+coldata$Mouse <- factor(coldata$Mouse)
+coldata$cluster <- factor(coldata$cluster, levels = c("C7", "C8"))
+cat("Ratones con ambos perfiles tras el filtro:", length(ratones), "\n")
+coldata
+```
+
+```{r normalizar_pseudobulk}
+if (length(ratones) == 0) stop("Ningún ratón conserva ambos clústeres; revisar min_celulas y meta_pb.")
+counts_pb <- as.matrix(pseudo[, rownames(coldata), drop = FALSE])
+diseno <- if (length(ratones) >= 2) ~ Mouse + cluster else ~ cluster
+dds <- DESeqDataSetFromMatrix(countData = counts_pb, colData = coldata, design = diseno)
+dds <- dds[rowSums(counts(dds)) >= 20, ]
+dds <- estimateSizeFactors(dds, type = "poscounts")
+normalizados <- counts(dds, normalized = TRUE)
+```
+
+```{r cambios_descriptivos}
+# Comparación C8 / C7 dentro de cada ratón; después, media entre ratones
+log2FC_por_raton <- log2(normalizados[, paste0(ratones, "_C8"), drop = FALSE] + 0.5) -
+  log2(normalizados[, paste0(ratones, "_C7"), drop = FALSE] + 0.5)
+colnames(log2FC_por_raton) <- paste0("log2FC_", ratones)
+res_descriptivo <- data.frame(gene = rownames(dds),
+                              log2FoldChange = rowMeans(log2FC_por_raton), log2FC_por_raton)
+res_descriptivo <- res_descriptivo[order(abs(res_descriptivo$log2FoldChange), decreasing = TRUE), ]
+head(res_descriptivo, 20)
+```
+
+```{r barras_log2fc, fig.width=9, fig.height=7}
+top_genes <- head(res_descriptivo, 15)
+ggplot(top_genes, aes(reorder(gene, log2FoldChange), log2FoldChange,
+                     fill = log2FoldChange > 0)) +
+  geom_col() + geom_hline(yintercept = 0) + coord_flip() +
+  scale_fill_manual(values = c("#377EB8", "#E41A1C"),
+                    breaks = c(FALSE, TRUE), labels = c("Mayor en C7", "Mayor en C8")) +
+  labs(x = "Gen", y = "log2FC descriptivo (C8 / C7)", fill = NULL) + theme_classic()
+```
+
+```{r expresion_diferencial}
+# Dos ratones pareados permiten un ajuste exploratorio; no hay un mínimo rígido de tres.
+# Los clústeres se definieron con estos mismos datos: los p-valores son exploratorios.
+res_de <- NULL
+if (length(ratones) >= 2) {
+  dds <- DESeq(dds)
+  res_de <- as.data.frame(results(dds, contrast = c("cluster", "C8", "C7"), alpha = 0.05)) %>%
+    rownames_to_column("gene")
+  res_de <- res_de[order(res_de$padj), ]
+  head(res_de, 20)
+} else {
+  cat("Solo queda un ratón pareado: se muestran log2FC descriptivos, sin p-valores ni p ajustados.")
+}
+```
+
+```{r volcano, fig.width=8, fig.height=6}
+if (!is.null(res_de)) {
+  volcano <- res_de %>% filter(!is.na(padj)) %>%
+    mutate(grupo = case_when(
+      padj < 0.05 & log2FoldChange > 2 ~ "Mayor en C8",
+      padj < 0.05 & log2FoldChange < -2 ~ "Mayor en C7",
+      TRUE ~ "No significativo"
+    ))
+  ggplot(volcano, aes(log2FoldChange, -log10(pmax(padj, 1e-300)), color = grupo)) +
+    geom_point(alpha = 0.6, size = 1) +
+    geom_vline(xintercept = c(-2, 2), linetype = "dashed") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+    scale_color_manual(values = c("Mayor en C7" = "#377EB8", "Mayor en C8" = "#E41A1C",
+                                  "No significativo" = "grey75")) +
+    labs(x = "log2FC (C8 / C7)", y = "-log10(p ajustado)", color = NULL) + theme_classic()
+}
+```
+
+```{r guardar_resultados}
+dir.create("../output/opcional4", recursive = TRUE, showWarnings = FALSE)
+save(comp, tipo, pseudo, meta_pb, min_celulas, coldata, ratones, dds,
+     res_descriptivo, res_de, file = "../output/opcional4/brain_clusters7_8.RData", compress = "xz")
+```

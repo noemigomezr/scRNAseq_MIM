@@ -1,0 +1,130 @@
+---
+title: "Single-cell RNA-seq II: preparación para pseudobulk"
+author: "Noemi Gomez"
+date: "07 de noviembre de 2026"
+output: html_document
+---
+
+```{r instalar_paquetes, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c("muscData", "DESeq2", "clusterProfiler"))
+install.packages("msigdbr")
+```
+
+```{r librerias}
+library(Seurat)
+library(muscData)
+library(SingleCellExperiment)
+library(tidyverse)
+library(DESeq2)
+library(clusterProfiler)
+library(msigdbr)
+```
+
+```{r cargar_datos}
+sce <- Kang18_8vs8()
+obj <- CreateSeuratObject(counts = counts(sce), meta.data = as.data.frame(colData(sce)),
+                          project = "Kang_IFNb", min.cells = 3, min.features = 200)
+```
+
+```{r preparar_metadatos}
+obj$donor_id <- as.character(obj$ind)
+obj$condition <- toupper(as.character(obj$stim))
+obj$cell_type <- as.character(obj$cell)
+obj$sample_id <- paste(obj$donor_id, obj$condition, sep = "_")
+```
+
+```{r resumen_dataset}
+cat("Células del dataset:", ncol(sce), "\nCélulas tras el filtro inicial:", ncol(obj),
+    "\nPacientes en total:", n_distinct(obj$donor_id), "\n")
+obj[[]] %>% distinct(donor_id, condition) %>% count(condition, name = "pacientes")
+```
+
+```{r generar_pseudobulk}
+pseudo <- AggregateExpression(obj, assays = "RNA",
+                              group.by = c("condition", "sample_id", "cell_type"),
+                              return.seurat = FALSE)$RNA
+dim(pseudo)
+as.matrix(pseudo[1:10, 1:6])
+```
+
+```{r metadatos_pseudobulk}
+meta_pb <- obj[[]] %>%
+  count(condition, sample_id, cell_type, donor_id, name = "n_cells")
+# Seurat reemplaza los guiones bajos dentro de cada etiqueta por guiones
+rownames(meta_pb) <- with(meta_pb, paste(condition, gsub("_", "-", sample_id),
+                                      gsub("_", "-", cell_type), sep = "_"))
+meta_pb <- meta_pb[colnames(pseudo), ]
+meta_pb$condition <- factor(meta_pb$condition, levels = c("CTRL", "STIM"))
+head(meta_pb)
+```
+
+```{r seleccionar_monocitos}
+# Conservar perfiles de monocitos CD14+ con al menos 20 células
+coldata <- subset(meta_pb, cell_type == "CD14+ Monocytes" & n_cells >= 20,
+                  select = c(donor_id, condition, sample_id, n_cells))
+coldata$donor_id <- factor(coldata$donor_id)
+counts_mono <- as.matrix(pseudo[, rownames(coldata), drop = FALSE])
+dim(counts_mono)
+table(coldata$donor_id, coldata$condition)
+```
+
+```{r preparar_deseq2}
+dds <- DESeqDataSetFromMatrix(countData = counts_mono, colData = coldata,
+                              design = ~ donor_id + condition)
+# Conservar genes con al menos 10 conteos en 3 o más perfiles
+keep <- rowSums(counts(dds) >= 10) >= 3
+dds <- dds[keep, ]
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("condition", "STIM", "CTRL"), alpha = 0.05)
+summary(res)
+```
+
+```{r preparar_volcano}
+# Contraste STIM / CTRL: log2FC positivo indica mayor expresión en STIM
+res_df <- as.data.frame(res) %>%
+  rownames_to_column("gene") %>%
+  filter(!is.na(padj)) %>%
+  mutate(grupo = case_when(
+    padj < 0.05 & log2FoldChange > 2 ~ "Mayor en STIM",
+    padj < 0.05 & log2FoldChange < -2 ~ "Mayor en CTRL",
+    TRUE ~ "No significativo"
+  ))
+table(res_df$grupo)
+genes_sig <- filter(res_df, grupo != "No significativo")
+head(genes_sig[order(genes_sig$padj), c("gene", "log2FoldChange", "padj", "grupo")])
+```
+
+```{r volcano, fig.width=8, fig.height=6}
+ggplot(res_df, aes(log2FoldChange, -log10(pmax(padj, 1e-300)), color = grupo)) +
+  geom_point(alpha = 0.6, size = 1) +
+  geom_vline(xintercept = c(-2, 2), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  scale_color_manual(values = c("Mayor en CTRL" = "#377EB8",
+                                "Mayor en STIM" = "#E41A1C",
+                                "No significativo" = "grey75")) +
+  labs(x = "log2FC (STIM / CTRL)", y = "-log10(p ajustado)", color = NULL) +
+  theme_classic()
+```
+
+```{r referencia_gobp}
+go_bp <- msigdbr(species = "Homo sapiens", collection = "C5", subcollection = "GO:BP") %>%
+  dplyr::select(gs_name, gene_symbol) %>%
+  distinct()
+```
+
+```{r enriquecimiento_gobp}
+genes <- split(genes_sig$gene, genes_sig$grupo)
+enriq <- compareCluster(
+  geneClusters = genes,
+  fun = "enricher",
+  TERM2GENE = go_bp,
+  universe = res_df$gene,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05
+)
+```
+
+```{r dotplot_gobp, fig.width=16, fig.height=8}
+enrichplot::dotplot(enriq, showCategory = 5) + labs(x = NULL, title = "Enriquecimiento GO:BP")
+```
